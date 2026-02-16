@@ -75,14 +75,22 @@ jobs:
           sed -i "s/pkgver=VERSION/pkgver=${{ steps.version.outputs.version }}/" "${{ github.workspace }}/PKGBUILD.patched"
           sed -i "s/sha256sums_x86_64=('SKIP')/sha256sums_x86_64=('${{ steps.checksum.outputs.sha256 }}')/" "${{ github.workspace }}/PKGBUILD.patched"
 
+      - name: Prepare build directory
+        run: |
+          mkdir -p /tmp/archbuild
+          cp "${{ github.workspace }}/PKGBUILD.patched" /tmp/archbuild/PKGBUILD
+          cp /tmp/release/tgtui_${{ steps.version.outputs.version }}_linux_amd64.tar.gz \
+            "/tmp/archbuild/tgtui-${{ steps.version.outputs.version }}-x86_64.tar.gz"
+
       - name: Build Arch package
         run: |
           docker run --rm \
+            -v /tmp/archbuild:/build \
             -v "${{ github.workspace }}:/workspace" \
             archlinux:base-devel /bin/bash -c "
             useradd -m builder && \
-            cp /workspace/PKGBUILD.patched /home/builder/PKGBUILD && \
-            chown builder:builder /home/builder/PKGBUILD && \
+            cp /build/* /home/builder/ && \
+            chown -R builder:builder /home/builder && \
             cd /home/builder && \
             su builder -c 'makepkg -s --noconfirm' && \
             cp /home/builder/*.pkg.tar.zst /workspace/
@@ -122,7 +130,7 @@ jobs:
           docker run --rm \
             -v /tmp/pkgdest:/pkgdest \
             -v "${{ github.workspace }}:/output" \
-            voidlinux/voidlinux:latest /bin/bash -c "
+            voidlinux/voidlinux:latest /bin/sh -c "
             xbps-create -A x86_64 \
               -n tgtui-${{ steps.version.outputs.version }}_1 \
               -s 'Telegram TUI client focused on text messaging' \
