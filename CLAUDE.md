@@ -41,9 +41,12 @@ TGTUI_API_ID=... TGTUI_API_HASH=... ./tgtui  # Run
 
 ### Key Bindings
 
+Helix-inspired modal navigation with Normal (NOR) and Insert (INS) modes:
+
 - `Tab` — switch focus between chat list and chat view
 - `j/k` or `↑/↓` — navigate chat list / scroll messages
-- `Enter` — select chat (in list) / send message (in input)
-- `Esc` — back to chat list from chat view
-- `PgUp/PgDown` — scroll messages
+- `Enter` — select chat (in list) / expand message (in normal) / send (in insert)
+- `i` — enter insert mode (chat view)
+- `Esc` — exit insert mode / collapse expanded message
+- `PgUp/PgDown` — page scroll messages
 - `Ctrl+C` — quit

@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/paramon-tech/tgtui/internal/format"
 	"github.com/paramon-tech/tgtui/internal/telegram"
 	"github.com/paramon-tech/tgtui/internal/ui/common"
 )
@@ -20,12 +21,19 @@ type Model struct {
 	width, height int
 	scrollOffset  int
 	inputFocused  bool
+	cursor        int
+	expandedMsgID int
+	// Photo thumbnail cache
+	photoCache   map[int]string // msgID → rendered half-block string
+	photoLines   map[int]int    // msgID → line count of rendered image
+	photoLoading map[int]bool   // msgID → currently downloading
 }
 
 func New(tg *telegram.Client) Model {
 	return Model{
-		tg:           tg,
-		inputFocused: true,
+		tg:            tg,
+		inputFocused:  true,
+		expandedMsgID: -1,
 	}
 }
 
@@ -39,12 +47,20 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if m.chat != nil && msg.ChatID == m.chat.ID {
 			m.messages = msg.Messages
 			m.scrollOffset = 0
+			m.cursor = len(m.messages) - 1
+			m.expandedMsgID = -1
 		}
 
 	case common.NewMessageMsg:
 		if m.chat != nil && msg.Message.ChatID == m.chat.ID {
 			m.messages = append(m.messages, msg.Message)
 			m.scrollOffset = 0
+			m.expandedMsgID = -1
+		}
+
+	case common.HistoryErrorMsg:
+		return m, func() tea.Msg {
+			return common.StatusMsg{Text: "Failed to load messages: " + msg.Err.Error()}
 		}
 
 	case common.MessageSendErrorMsg:
@@ -60,6 +76,19 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return tg.FetchHistory(chat)()
 			}
 		}
+
+	case common.DownloadPhotoMsg:
+		rendered, lines, err := format.RenderImageHalfBlock(msg.Data, m.photoMaxWidth(), m.photoMaxHeight())
+		if err == nil {
+			m.initPhotoCaches()
+			m.photoCache[msg.MessageID] = rendered
+			m.photoLines[msg.MessageID] = lines
+		}
+		delete(m.photoLoading, msg.MessageID)
+		m.ensureCursorVisible()
+
+	case common.DownloadPhotoErrorMsg:
+		delete(m.photoLoading, msg.MessageID)
 
 	case tea.KeyMsg:
 		if !m.focused || m.chat == nil {
@@ -83,6 +112,7 @@ func (m Model) handleInputKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "pgup":
 		m.inputFocused = false
+		m.clampCursor()
 		return m, nil
 	}
 
@@ -117,28 +147,63 @@ func (m Model) handleInputKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 func (m Model) handleViewportKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
-		if m.scrollOffset < len(m.messages)-1 {
-			m.scrollOffset++
+		if m.cursor > 0 {
+			m.cursor--
+			m.ensureCursorVisible()
 		}
 	case "down", "j":
-		if m.scrollOffset > 0 {
-			m.scrollOffset--
-		}
-	case "pgup":
-		m.scrollOffset += 10
-		max := len(m.messages) - 1
-		if max < 0 {
-			max = 0
-		}
-		if m.scrollOffset > max {
-			m.scrollOffset = max
-		}
-	case "pgdown":
-		m.scrollOffset -= 10
-		if m.scrollOffset < 0 {
-			m.scrollOffset = 0
+		if m.cursor < len(m.messages)-1 {
+			m.cursor++
+			m.ensureCursorVisible()
 		}
 	case "enter":
+		if m.cursor >= 0 && m.cursor < len(m.messages) {
+			curMsg := m.messages[m.cursor]
+			msgID := curMsg.ID
+			if m.expandedMsgID == msgID {
+				m.expandedMsgID = -1
+			} else {
+				m.expandedMsgID = msgID
+				// Trigger photo download if applicable
+				if curMsg.Media != nil && curMsg.Media.Type == telegram.MediaPhoto && curMsg.Media.PhotoThumbSize != "" {
+					if !m.photoLoading[msgID] && m.photoCache[msgID] == "" {
+						m.initPhotoCaches()
+						m.photoLoading[msgID] = true
+						tgClient := m.tg
+						info := curMsg.Media
+						m.ensureCursorVisible()
+						return m, func() tea.Msg {
+							return tgClient.DownloadPhoto(msgID, info)()
+						}
+					}
+				}
+			}
+			m.ensureCursorVisible()
+		}
+	case "pgup":
+		pageSize := m.msgAreaHeight()
+		if pageSize < 1 {
+			pageSize = 1
+		}
+		m.cursor -= pageSize
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		m.ensureCursorVisible()
+	case "pgdown":
+		pageSize := m.msgAreaHeight()
+		if pageSize < 1 {
+			pageSize = 1
+		}
+		m.cursor += pageSize
+		if m.cursor >= len(m.messages) {
+			m.cursor = len(m.messages) - 1
+		}
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		m.ensureCursorVisible()
+	case "i":
 		if m.chat.Type != telegram.ChatTypeChannel {
 			m.inputFocused = true
 		}
@@ -156,7 +221,7 @@ func (m Model) View() string {
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(common.ColorPrimary).
-		Width(m.width).
+		MaxWidth(m.width).
 		Padding(0, 1)
 	title := titleStyle.Render(m.chat.Title)
 
@@ -181,7 +246,14 @@ func (m Model) View() string {
 		parts = append(parts, inputView)
 	}
 
-	return strings.Join(parts, "\n")
+	result := strings.Join(parts, "\n")
+
+	// Ensure exact height by padding or truncating
+	resultLines := strings.Split(result, "\n")
+	for len(resultLines) < m.height {
+		resultLines = append(resultLines, "")
+	}
+	return strings.Join(resultLines[:m.height], "\n")
 }
 
 func (m Model) renderMessages(height int) string {
@@ -194,24 +266,30 @@ func (m Model) renderMessages(height int) string {
 			common.StyleMuted.Render("No messages"))
 	}
 
-	var lines []string
-	for _, msg := range m.messages {
-		line := m.renderMessage(msg)
-		lines = append(lines, line)
+	// Build all visual lines
+	var allLines []string
+	for i, msg := range m.messages {
+		isSelected := (i == m.cursor)
+		isExpanded := msg.ID == m.expandedMsgID
+		lines := m.renderMessageLines(msg, isSelected, isExpanded)
+		allLines = append(allLines, lines...)
 	}
 
-	// Apply scroll offset: show messages from end
-	totalLines := len(lines)
+	// Apply scroll offset: show from bottom
+	totalLines := len(allLines)
 	end := totalLines - m.scrollOffset
 	if end < 0 {
 		end = 0
+	}
+	if end > totalLines {
+		end = totalLines
 	}
 	start := end - height
 	if start < 0 {
 		start = 0
 	}
 
-	visible := lines[start:end]
+	visible := allLines[start:end]
 
 	// Pad with empty lines at top if needed
 	for len(visible) < height {
@@ -221,7 +299,7 @@ func (m Model) renderMessages(height int) string {
 	return strings.Join(visible, "\n")
 }
 
-func (m Model) renderMessage(msg telegram.Message) string {
+func (m Model) renderMessageLines(msg telegram.Message, isSelected, isExpanded bool) []string {
 	ts := time.Unix(int64(msg.Date), 0).Format("15:04")
 	timestamp := common.StyleTimestamp.Render("[" + ts + "]")
 
@@ -234,17 +312,72 @@ func (m Model) renderMessage(msg telegram.Message) string {
 		sender = common.StyleSender.Render("Unknown")
 	}
 
-	text := msg.Text
-	if text == "" {
-		text = common.StyleMuted.Render("[non-text message]")
+	prefix := "  "
+	if isSelected {
+		if m.inputFocused {
+			prefix = lipgloss.NewStyle().Foreground(common.ColorMuted).Render(">") + " "
+		} else {
+			prefix = lipgloss.NewStyle().Foreground(common.ColorPrimary).Render(">") + " "
+		}
 	}
 
-	return fmt.Sprintf(" %s %s: %s", timestamp, sender, text)
+	if isExpanded && (msg.Text != "" || msg.Media != nil) {
+		// Header line
+		header := fmt.Sprintf("%s%s %s:", prefix, timestamp, sender)
+
+		indent := "    "
+		textWidth := m.width - len(indent)
+		if textWidth < 20 {
+			textWidth = 20
+		}
+
+		lines := []string{header}
+
+		// Media label line
+		if msg.Media != nil {
+			lines = append(lines, indent+common.StyleMediaLabel.Render(msg.Media.Label))
+		}
+
+		// Photo thumbnail (or loading placeholder)
+		if msg.Media != nil && msg.Media.Type == telegram.MediaPhoto {
+			if rendered, ok := m.photoCache[msg.ID]; ok {
+				for _, il := range strings.Split(rendered, "\n") {
+					lines = append(lines, indent+il)
+				}
+			} else if m.photoLoading[msg.ID] {
+				lines = append(lines, indent+common.StyleMuted.Render("[Loading photo...]"))
+			}
+		}
+
+		// Full text, word-wrapped
+		if msg.Text != "" {
+			styledText := format.RenderStyledTextMultiline(msg.Text, msg.Entities, textWidth)
+			for _, tl := range strings.Split(styledText, "\n") {
+				lines = append(lines, indent+tl)
+			}
+		}
+		return lines
+	}
+
+	// Collapsed: single line
+	var text string
+	switch {
+	case msg.Media != nil && msg.Text != "":
+		text = common.StyleMediaLabel.Render(msg.Media.Label) + " " + format.RenderStyledText(msg.Text, msg.Entities)
+	case msg.Media != nil:
+		text = common.StyleMediaLabel.Render(msg.Media.Label)
+	case msg.Text != "":
+		text = format.RenderStyledText(msg.Text, msg.Entities)
+	default:
+		text = common.StyleMuted.Render("[empty message]")
+	}
+	line := fmt.Sprintf("%s%s %s: %s", prefix, timestamp, sender, text)
+	return []string{lipgloss.NewStyle().MaxWidth(m.width).Render(line)}
 }
 
 func (m Model) renderInput() string {
 	style := lipgloss.NewStyle().
-		Width(m.width).
+		MaxWidth(m.width).
 		Padding(0, 1)
 
 	prefix := common.StyleMuted.Render("> ")
@@ -256,12 +389,119 @@ func (m Model) renderInput() string {
 	return style.Render(prefix + m.input + cursor)
 }
 
+// Helper methods
+
+func (m Model) msgAreaHeight() int {
+	inputHeight := 0
+	if m.chat != nil && m.chat.Type != telegram.ChatTypeChannel {
+		inputHeight = 1
+	}
+	return m.height - 1 - inputHeight
+}
+
+func (m Model) visualHeight(msg telegram.Message) int {
+	if msg.ID == m.expandedMsgID && (msg.Text != "" || msg.Media != nil) {
+		h := 1 // header line
+		if msg.Media != nil {
+			h++ // media label line
+		}
+		// Photo thumbnail lines
+		if msg.Media != nil && msg.Media.Type == telegram.MediaPhoto {
+			if lines, ok := m.photoLines[msg.ID]; ok {
+				h += lines
+			} else if m.photoLoading[msg.ID] {
+				h++ // "[Loading photo...]" placeholder
+			}
+		}
+		if msg.Text != "" {
+			indent := "    "
+			textWidth := m.width - len(indent)
+			if textWidth < 20 {
+				textWidth = 20
+			}
+			styledText := format.RenderStyledTextMultiline(msg.Text, msg.Entities, textWidth)
+			h += strings.Count(styledText, "\n") + 1
+		}
+		return h
+	}
+	return 1
+}
+
+func (m *Model) ensureCursorVisible() {
+	if len(m.messages) == 0 || m.cursor < 0 {
+		return
+	}
+
+	height := m.msgAreaHeight()
+	if height <= 0 {
+		return
+	}
+
+	// Calculate visual line positions
+	linePos := 0
+	msgTop := 0
+	msgBottom := 0
+	for i, msg := range m.messages {
+		h := m.visualHeight(msg)
+		if i == m.cursor {
+			msgTop = linePos
+			msgBottom = linePos + h
+		}
+		linePos += h
+	}
+	totalLines := linePos
+
+	// Current visible range
+	visibleBottom := totalLines - m.scrollOffset
+	visibleTop := visibleBottom - height
+
+	// Adjust scroll to make cursor visible
+	if msgTop < visibleTop {
+		m.scrollOffset = totalLines - msgTop - height
+	}
+	if msgBottom > visibleBottom {
+		m.scrollOffset = totalLines - msgBottom
+	}
+
+	// Clamp
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	}
+	maxScroll := totalLines - height
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.scrollOffset > maxScroll {
+		m.scrollOffset = maxScroll
+	}
+}
+
+func (m *Model) clampCursor() {
+	if len(m.messages) == 0 {
+		m.cursor = -1
+		return
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor >= len(m.messages) {
+		m.cursor = len(m.messages) - 1
+	}
+}
+
+// Public accessors
+
 func (m Model) SetChat(chat *telegram.Chat) Model {
 	m.chat = chat
 	m.messages = nil
 	m.input = ""
 	m.scrollOffset = 0
-	m.inputFocused = true
+	m.cursor = -1
+	m.expandedMsgID = -1
+	m.inputFocused = chat.Type != telegram.ChatTypeChannel
+	m.photoCache = nil
+	m.photoLines = nil
+	m.photoLoading = nil
 	return m
 }
 
@@ -273,9 +513,6 @@ func (m Model) SetSize(w, h int) Model {
 
 func (m Model) SetFocus(focused bool) Model {
 	m.focused = focused
-	if focused {
-		m.inputFocused = true
-	}
 	return m
 }
 
@@ -290,4 +527,47 @@ func (m Model) InputFocused() bool {
 func (m Model) SetInputFocus(focused bool) Model {
 	m.inputFocused = focused
 	return m
+}
+
+func (m Model) HasExpanded() bool {
+	return m.expandedMsgID != -1
+}
+
+func (m Model) CollapseExpanded() Model {
+	m.expandedMsgID = -1
+	return m
+}
+
+func (m *Model) initPhotoCaches() {
+	if m.photoCache == nil {
+		m.photoCache = make(map[int]string)
+	}
+	if m.photoLines == nil {
+		m.photoLines = make(map[int]int)
+	}
+	if m.photoLoading == nil {
+		m.photoLoading = make(map[int]bool)
+	}
+}
+
+func (m Model) photoMaxWidth() int {
+	w := m.width - 8 // indent + some margin
+	if w > 40 {
+		w = 40
+	}
+	if w < 10 {
+		w = 10
+	}
+	return w
+}
+
+func (m Model) photoMaxHeight() int {
+	h := m.msgAreaHeight() / 2
+	if h > 15 {
+		h = 15
+	}
+	if h < 5 {
+		h = 5
+	}
+	return h
 }

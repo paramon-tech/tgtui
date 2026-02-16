@@ -8,11 +8,12 @@ import (
 
 type Model struct {
 	text  string
+	mode  string
 	width int
 }
 
 func New() Model {
-	return Model{text: "Connecting..."}
+	return Model{text: "Connecting...", mode: "NOR"}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -34,15 +35,24 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
-	style := lipgloss.NewStyle().
-		Width(m.width).
-		Foreground(common.ColorMuted).
-		Padding(0, 1)
-
-	return style.Render(m.text)
+	modeStyle := lipgloss.NewStyle().Bold(true)
+	switch m.mode {
+	case "INS":
+		modeStyle = modeStyle.Foreground(common.ColorSecondary)
+	default:
+		modeStyle = modeStyle.Foreground(common.ColorPrimary)
+	}
+	mode := modeStyle.Render(m.mode)
+	text := lipgloss.NewStyle().Foreground(common.ColorMuted).Render(m.text)
+	return lipgloss.NewStyle().Width(m.width).Padding(0, 1).Render(mode + "  " + text)
 }
 
 func (m Model) SetSize(w int) Model {
 	m.width = w
+	return m
+}
+
+func (m Model) SetMode(mode string) Model {
+	m.mode = mode
 	return m
 }

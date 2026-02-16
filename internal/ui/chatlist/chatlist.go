@@ -15,6 +15,7 @@ type Model struct {
 	cursor        int
 	offset        int
 	focused       bool
+	activeChatID  int64
 	width, height int
 }
 
@@ -87,11 +88,24 @@ func (m *Model) updateOnNewMessage(msg telegram.Message) {
 				Text:     msg.Text,
 				Date:     msg.Date,
 				Out:      msg.Out,
+				Media:    msg.Media,
 			}
-			// Move to top
+			// Move to top and adjust cursor/offset
 			chat := m.chats[i]
 			copy(m.chats[1:i+1], m.chats[0:i])
 			m.chats[0] = chat
+
+			if m.cursor == i {
+				// Cursor was on the moved chat — follow it to top
+				m.cursor = 0
+				m.offset = 0
+			} else if m.cursor < i {
+				// Cursor is above the moved chat — items shifted down
+				m.cursor++
+				if m.cursor >= m.offset+m.visibleCount() {
+					m.offset++
+				}
+			}
 			return
 		}
 	}
@@ -112,13 +126,12 @@ func (m Model) View() string {
 		lines = append(lines, line)
 	}
 
-	content := strings.Join(lines, "\n")
+	// Pad to fixed height
+	for len(lines) < m.height {
+		lines = append(lines, "")
+	}
 
-	style := lipgloss.NewStyle().
-		Width(m.width).
-		Height(m.height)
-
-	return style.Render(content)
+	return strings.Join(lines[:m.height], "\n")
 }
 
 func (m Model) renderChat(chat telegram.Chat, selected bool) string {
@@ -127,14 +140,14 @@ func (m Model) renderChat(chat telegram.Chat, selected bool) string {
 		width = 4
 	}
 
-	var prefix string
+	var typePrefix string
 	switch chat.Type {
 	case telegram.ChatTypeGroup:
-		prefix = "#"
+		typePrefix = "#"
 	case telegram.ChatTypeChannel:
-		prefix = ">"
+		typePrefix = ">"
 	default:
-		prefix = " "
+		typePrefix = " "
 	}
 
 	name := truncate(chat.Title, width-8)
@@ -144,12 +157,24 @@ func (m Model) renderChat(chat telegram.Chat, selected bool) string {
 		unread = common.StyleUnread.Render(fmt.Sprintf(" (%d)", chat.UnreadCount))
 	}
 
-	line := fmt.Sprintf(" %s %s%s", prefix, name, unread)
+	line := fmt.Sprintf(" %s %s%s", typePrefix, name, unread)
+	isActive := chat.ID == m.activeChatID && m.activeChatID != 0
 
+	var marker string
 	if selected && m.focused {
-		return common.StyleSelected.Render(">" + line)
+		// Cursor + focused: bold primary with ">"
+		return lipgloss.NewStyle().MaxWidth(m.width).Render(common.StyleSelected.Render(">" + line))
+	} else if selected {
+		// Cursor + unfocused: muted ">" marker
+		marker = common.StyleMuted.Render(">")
+		return lipgloss.NewStyle().MaxWidth(m.width).Render(marker + line)
+	} else if isActive {
+		// Active chat (not cursor): primary "│" marker
+		marker = lipgloss.NewStyle().Foreground(common.ColorPrimary).Render("│")
+		return lipgloss.NewStyle().MaxWidth(m.width).Render(marker + line)
 	}
-	return " " + line
+	// Normal: space marker
+	return lipgloss.NewStyle().MaxWidth(m.width).Render(" " + line)
 }
 
 func (m Model) visibleCount() int {
@@ -175,6 +200,11 @@ func (m Model) SelectedChat() (telegram.Chat, bool) {
 		return m.chats[m.cursor], true
 	}
 	return telegram.Chat{}, false
+}
+
+func (m Model) SetActiveChat(id int64) Model {
+	m.activeChatID = id
+	return m
 }
 
 func (m Model) Focused() bool {

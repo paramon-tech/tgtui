@@ -85,6 +85,8 @@ func (c *Client) FetchHistory(chat Chat) func() interface{} {
 				Text:     msg.Message,
 				Date:     msg.Date,
 				Out:      msg.Out,
+				Entities: msg.Entities,
+				Media:    extractMediaInfo(msg.Media),
 			})
 		}
 

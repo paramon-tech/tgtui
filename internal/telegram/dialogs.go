@@ -144,6 +144,7 @@ func (c *Client) extractDialogs(dialogs []tg.DialogClass, users []tg.UserClass, 
 						Text:     msg.Message,
 						Date:     msg.Date,
 						Out:      msg.Out,
+						Media:    extractMediaInfo(msg.Media),
 					}
 				}
 			}

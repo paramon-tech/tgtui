@@ -65,19 +65,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.screen == screenMain {
 			if msg.String() == "tab" {
 				a.toggleFocus()
+				a.updateMode()
 				return a, nil
 			}
 			if msg.String() == "esc" && a.focus == focusChatView {
 				if a.chatView.InputFocused() {
-					// First Esc: exit input mode, stay in chat view
+					// Esc: exit input mode, stay in chat view
 					a.chatView = a.chatView.SetInputFocus(false)
+					a.updateMode()
 					return a, nil
 				}
-				// Second Esc: go back to chat list
-				a.focus = focusChatList
-				a.chatList = a.chatList.SetFocus(true)
-				a.chatView = a.chatView.SetFocus(false)
-				return a, nil
+				if a.chatView.HasExpanded() {
+					// Esc with expanded message: collapse it
+					a.chatView = a.chatView.CollapseExpanded()
+					return a, nil
+				}
 			}
 		}
 
@@ -103,7 +105,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.chatView = a.chatView.SetChat(&chat)
 		a.focus = focusChatView
 		a.chatList = a.chatList.SetFocus(false)
+		a.chatList = a.chatList.SetActiveChat(chat.ID)
 		a.chatView = a.chatView.SetFocus(true)
+		a.updateMode()
 		tg := a.tg
 		return a, func() tea.Msg {
 			return tg.FetchHistory(chat)()
@@ -139,6 +143,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+
+		a.updateMode()
 	}
 
 	return a, tea.Batch(cmds...)
@@ -172,15 +178,6 @@ func (a App) mainView() string {
 	if listWidth < 20 {
 		listWidth = 20
 	}
-	viewWidth := a.width - listWidth - 1 // 1 for separator
-
-	listStyle := lipgloss.NewStyle().
-		Width(listWidth).
-		Height(mainHeight)
-
-	viewStyle := lipgloss.NewStyle().
-		Width(viewWidth).
-		Height(mainHeight)
 
 	sepStr := ""
 	for i := 0; i < mainHeight; i++ {
@@ -193,8 +190,8 @@ func (a App) mainView() string {
 		Foreground(ColorMuted).
 		Render(sepStr)
 
-	list := listStyle.Render(a.chatList.View())
-	view := viewStyle.Render(a.chatView.View())
+	list := a.chatList.View()
+	view := a.chatView.View()
 
 	main := lipgloss.JoinHorizontal(lipgloss.Top, list, separator, view)
 	status := a.statusBar.View()
@@ -212,6 +209,20 @@ func (a *App) toggleFocus() {
 		a.chatList = a.chatList.SetFocus(true)
 		a.chatView = a.chatView.SetFocus(false)
 	}
+}
+
+func (a *App) currentMode() string {
+	if a.focus == focusChatList {
+		return "NOR"
+	}
+	if a.chatView.InputFocused() {
+		return "INS"
+	}
+	return "NOR"
+}
+
+func (a *App) updateMode() {
+	a.statusBar = a.statusBar.SetMode(a.currentMode())
 }
 
 func (a *App) updateSizes() {

@@ -39,6 +39,8 @@ func (c *Client) setupHandlers(dispatcher tg.UpdateDispatcher) {
 				Text:     msg.Message,
 				Date:     msg.Date,
 				Out:      msg.Out,
+				Entities: msg.Entities,
+				Media:    extractMediaInfo(msg.Media),
 			},
 		})
 		return nil
@@ -72,6 +74,8 @@ func (c *Client) setupHandlers(dispatcher tg.UpdateDispatcher) {
 				Text:     msg.Message,
 				Date:     msg.Date,
 				Out:      msg.Out,
+				Entities: msg.Entities,
+				Media:    extractMediaInfo(msg.Media),
 			},
 		})
 		return nil

@@ -36,4 +36,7 @@ var (
 	StyleUnread = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#E0AF68"))
+
+	StyleMediaLabel = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#7DCFFF"))
 )
