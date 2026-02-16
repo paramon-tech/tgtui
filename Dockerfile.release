@@ -1,0 +1,3 @@
+FROM alpine:latest
+COPY tgtui /usr/bin/tgtui
+ENTRYPOINT ["/usr/bin/tgtui"]

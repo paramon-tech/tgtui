@@ -1,0 +1,16 @@
+# Template file for 'tgtui'
+pkgname=tgtui
+version=VERSION
+revision=1
+archs="x86_64 aarch64"
+short_desc="Telegram TUI client focused on text messaging"
+maintainer="paramon-tech <paramon-tech@users.noreply.github.com>"
+license="GPL-3.0-only"
+homepage="https://github.com/paramon-tech/tgtui"
+distfiles="https://github.com/paramon-tech/tgtui/releases/download/v${version}/tgtui_${version}_linux_amd64.tar.gz"
+checksum=SKIP
+
+do_install() {
+	vbin tgtui
+	vlicense LICENSE
+}

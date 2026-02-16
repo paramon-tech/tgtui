@@ -1,0 +1,67 @@
+version: 2
+
+project_name: tgtui
+
+builds:
+  - main: ./main.go
+    binary: tgtui
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+nfpms:
+  - package_name: tgtui
+    vendor: paramon-tech
+    homepage: https://github.com/paramon-tech/tgtui
+    maintainer: paramon-tech <paramon-tech@users.noreply.github.com>
+    description: Telegram TUI client focused on text messaging
+    license: GPL-3.0
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+
+dockers:
+  - image_templates:
+      - "ghcr.io/paramon-tech/tgtui:{{ .Version }}-amd64"
+    use: buildx
+    dockerfile: Dockerfile.release
+    build_flag_templates:
+      - "--platform=linux/amd64"
+    goarch: amd64
+  - image_templates:
+      - "ghcr.io/paramon-tech/tgtui:{{ .Version }}-arm64"
+    use: buildx
+    dockerfile: Dockerfile.release
+    build_flag_templates:
+      - "--platform=linux/arm64"
+    goarch: arm64
+
+docker_manifests:
+  - name_template: "ghcr.io/paramon-tech/tgtui:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/paramon-tech/tgtui:{{ .Version }}-amd64"
+      - "ghcr.io/paramon-tech/tgtui:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/paramon-tech/tgtui:latest"
+    image_templates:
+      - "ghcr.io/paramon-tech/tgtui:{{ .Version }}-amd64"
+      - "ghcr.io/paramon-tech/tgtui:{{ .Version }}-arm64"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
