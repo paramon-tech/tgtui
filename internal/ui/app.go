@@ -68,6 +68,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, nil
 			}
 			if msg.String() == "esc" && a.focus == focusChatView {
+				if a.chatView.InputFocused() {
+					// First Esc: exit input mode, stay in chat view
+					a.chatView = a.chatView.SetInputFocus(false)
+					return a, nil
+				}
+				// Second Esc: go back to chat list
 				a.focus = focusChatList
 				a.chatList = a.chatList.SetFocus(true)
 				a.chatView = a.chatView.SetFocus(false)

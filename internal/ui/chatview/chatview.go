@@ -52,6 +52,15 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return common.StatusMsg{Text: "Send failed: " + msg.Err.Error()}
 		}
 
+	case common.MessageSentMsg:
+		if m.chat != nil && msg.ChatID == m.chat.ID {
+			tg := m.tg
+			chat := *m.chat
+			return m, func() tea.Msg {
+				return tg.FetchHistory(chat)()
+			}
+		}
+
 	case tea.KeyMsg:
 		if !m.focused || m.chat == nil {
 			return m, nil
@@ -72,9 +81,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 func (m Model) handleInputKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc":
-		m.inputFocused = false
-		return m, nil
 	case "pgup":
 		m.inputFocused = false
 		return m, nil
@@ -275,4 +281,13 @@ func (m Model) SetFocus(focused bool) Model {
 
 func (m Model) Focused() bool {
 	return m.focused
+}
+
+func (m Model) InputFocused() bool {
+	return m.inputFocused
+}
+
+func (m Model) SetInputFocus(focused bool) Model {
+	m.inputFocused = focused
+	return m
 }
