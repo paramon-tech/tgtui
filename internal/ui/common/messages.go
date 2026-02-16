@@ -18,6 +18,8 @@ type (
 	MessageSendErrorMsg   = telegram.MessageSendErrorMsg
 	DownloadPhotoMsg      = telegram.DownloadPhotoMsg
 	DownloadPhotoErrorMsg = telegram.DownloadPhotoErrorMsg
+	SaveFileMsg           = telegram.SaveFileMsg
+	SaveFileErrorMsg      = telegram.SaveFileErrorMsg
 )
 
 // FatalErrorMsg is sent when the telegram client encounters a fatal error.

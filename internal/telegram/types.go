@@ -16,6 +16,7 @@ type Chat struct {
 	Title       string
 	Type        ChatType
 	UnreadCount int
+	Pinned      bool
 	LastMessage *Message
 }
 
@@ -40,14 +41,20 @@ type MediaInfo struct {
 	Label    string // Pre-formatted: "[Photo]", "[Video 0:32]", etc.
 	FileName string
 	FileSize int64
+	MimeType string
 	Width    int
 	Height   int
-	// Photo download fields (Phase 2)
+	// Photo download fields
 	PhotoID         int64
 	PhotoAccessHash int64
 	PhotoFileRef    []byte
 	PhotoDCID       int
 	PhotoThumbSize  string
+	// Document download fields (videos, audio, files, etc.)
+	DocID         int64
+	DocAccessHash int64
+	DocFileRef    []byte
+	DocDCID       int
 }
 
 type Message struct {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
 	"github.com/gotd/td/tg"
@@ -17,6 +18,92 @@ type DownloadPhotoMsg struct {
 type DownloadPhotoErrorMsg struct {
 	MessageID int
 	Err       error
+}
+
+type SaveFileMsg struct {
+	MessageID int
+	Path      string
+}
+
+type SaveFileErrorMsg struct {
+	MessageID int
+	Err       error
+}
+
+// DownloadToFile saves a media file (photo or document) to disk.
+func (c *Client) DownloadToFile(msgID int, info *MediaInfo, destPath string) func() interface{} {
+	return func() interface{} {
+		if info == nil {
+			return SaveFileErrorMsg{MessageID: msgID, Err: fmt.Errorf("no media info")}
+		}
+
+		var loc tg.InputFileLocationClass
+
+		switch info.Type {
+		case MediaPhoto:
+			if info.PhotoThumbSize == "" {
+				return SaveFileErrorMsg{MessageID: msgID, Err: fmt.Errorf("no photo size available")}
+			}
+			loc = &tg.InputPhotoFileLocation{
+				ID:            info.PhotoID,
+				AccessHash:    info.PhotoAccessHash,
+				FileReference: info.PhotoFileRef,
+				ThumbSize:     info.PhotoThumbSize,
+			}
+		default:
+			if info.DocID == 0 {
+				return SaveFileErrorMsg{MessageID: msgID, Err: fmt.Errorf("no document info available")}
+			}
+			loc = &tg.InputDocumentFileLocation{
+				ID:            info.DocID,
+				AccessHash:    info.DocAccessHash,
+				FileReference: info.DocFileRef,
+				ThumbSize:     "", // full file
+			}
+		}
+
+		f, err := os.Create(destPath)
+		if err != nil {
+			return SaveFileErrorMsg{MessageID: msgID, Err: err}
+		}
+		defer f.Close()
+
+		offset := int64(0)
+		const chunkSize = 1024 * 1024 // 1MB
+		for {
+			result, err := c.api.UploadGetFile(c.ctx, &tg.UploadGetFileRequest{
+				Location: loc,
+				Offset:   offset,
+				Limit:    chunkSize,
+			})
+			if err != nil {
+				os.Remove(destPath)
+				return SaveFileErrorMsg{MessageID: msgID, Err: err}
+			}
+
+			file, ok := result.(*tg.UploadFile)
+			if !ok {
+				os.Remove(destPath)
+				return SaveFileErrorMsg{MessageID: msgID, Err: fmt.Errorf("unexpected upload response")}
+			}
+
+			if len(file.Bytes) == 0 {
+				break
+			}
+
+			if _, err := f.Write(file.Bytes); err != nil {
+				os.Remove(destPath)
+				return SaveFileErrorMsg{MessageID: msgID, Err: err}
+			}
+
+			if len(file.Bytes) < chunkSize {
+				break
+			}
+			offset += int64(len(file.Bytes))
+		}
+
+		return SaveFileMsg{MessageID: msgID, Path: destPath}
+	}
 }
 
 func (c *Client) DownloadPhoto(msgID int, info *MediaInfo) func() interface{} {
@@ -165,15 +252,15 @@ func extractMediaInfo(media tg.MessageMediaClass) *MediaInfo {
 
 func extractDocMediaInfo(doc *tg.Document) *MediaInfo {
 	var (
-		isSticker   bool
-		isGif       bool
-		isVoice     bool
-		isVideo     bool
-		isAudio     bool
-		stickerAlt  string
-		duration    float64
-		audioTitle  string
-		fileName    string
+		isSticker  bool
+		isGif      bool
+		isVoice    bool
+		isVideo    bool
+		isAudio    bool
+		stickerAlt string
+		duration   float64
+		audioTitle string
+		fileName   string
 	)
 
 	for _, attr := range doc.Attributes {
@@ -201,6 +288,19 @@ func extractDocMediaInfo(doc *tg.Document) *MediaInfo {
 		}
 	}
 
+	// Common doc download fields
+	docFields := func(info *MediaInfo) *MediaInfo {
+		info.DocID = doc.ID
+		info.DocAccessHash = doc.AccessHash
+		info.DocFileRef = doc.FileReference
+		info.DocDCID = doc.DCID
+		info.MimeType = doc.MimeType
+		if info.FileName == "" {
+			info.FileName = fileName
+		}
+		return info
+	}
+
 	switch {
 	case isSticker:
 		label := "[Sticker"
@@ -208,30 +308,32 @@ func extractDocMediaInfo(doc *tg.Document) *MediaInfo {
 			label += " " + stickerAlt
 		}
 		label += "]"
-		return &MediaInfo{
+		return docFields(&MediaInfo{
 			Type:  MediaSticker,
 			Label: label,
-		}
+		})
 
 	case isGif:
-		return &MediaInfo{
-			Type:  MediaAnimation,
-			Label: "[GIF]",
-		}
+		return docFields(&MediaInfo{
+			Type:     MediaAnimation,
+			Label:    "[GIF]",
+			FileSize: doc.Size,
+		})
 
 	case isVoice:
-		return &MediaInfo{
-			Type:  MediaVoice,
-			Label: fmt.Sprintf("[Voice %s]", formatDuration(duration)),
-		}
+		return docFields(&MediaInfo{
+			Type:     MediaVoice,
+			Label:    fmt.Sprintf("[Voice %s]", formatDuration(duration)),
+			FileSize: doc.Size,
+		})
 
 	case isVideo:
-		return &MediaInfo{
+		return docFields(&MediaInfo{
 			Type:     MediaVideo,
 			Label:    fmt.Sprintf("[Video %s]", formatDuration(duration)),
 			FileName: fileName,
 			FileSize: doc.Size,
-		}
+		})
 
 	case isAudio:
 		label := "[Audio"
@@ -239,12 +341,12 @@ func extractDocMediaInfo(doc *tg.Document) *MediaInfo {
 			label += ": " + audioTitle
 		}
 		label += fmt.Sprintf(" (%s)]", formatDuration(duration))
-		return &MediaInfo{
+		return docFields(&MediaInfo{
 			Type:     MediaAudio,
 			Label:    label,
 			FileName: fileName,
 			FileSize: doc.Size,
-		}
+		})
 	}
 
 	// Generic document / file
@@ -258,27 +360,16 @@ func extractDocMediaInfo(doc *tg.Document) *MediaInfo {
 		}
 	}
 	label := fmt.Sprintf("[Document: %s (%s)]", name, formatFileSize(doc.Size))
-	return &MediaInfo{
+	return docFields(&MediaInfo{
 		Type:     MediaDocument,
 		Label:    label,
 		FileName: fileName,
 		FileSize: doc.Size,
-	}
+	})
 }
 
-// findThumbSize picks the best thumbnail from a photo's sizes.
-// Prefers "m" (320px), falls back to largest available.
+// findThumbSize picks the largest available photo size for best quality.
 func findThumbSize(sizes []tg.PhotoSizeClass) (thumbType string, w, h int) {
-	// Prefer "m" size (~320px)
-	for _, s := range sizes {
-		switch sz := s.(type) {
-		case *tg.PhotoSize:
-			if sz.Type == "m" {
-				return sz.Type, sz.W, sz.H
-			}
-		}
-	}
-	// Fall back to largest PhotoSize
 	var best *tg.PhotoSize
 	for _, s := range sizes {
 		if sz, ok := s.(*tg.PhotoSize); ok {

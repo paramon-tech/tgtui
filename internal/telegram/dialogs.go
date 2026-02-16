@@ -33,16 +33,26 @@ func (c *Client) FetchDialogs() func() interface{} {
 			chats = c.extractDialogs(r.Dialogs, r.Users, r.Chats, r.Messages)
 		}
 
-		sort.Slice(chats, func(i, j int) bool {
-			var di, dj int
-			if chats[i].LastMessage != nil {
-				di = chats[i].LastMessage.Date
+		// Partition: pinned chats first (preserve server order), then non-pinned by date
+		var pinned, unpinned []Chat
+		for _, c := range chats {
+			if c.Pinned {
+				pinned = append(pinned, c)
+			} else {
+				unpinned = append(unpinned, c)
 			}
-			if chats[j].LastMessage != nil {
-				dj = chats[j].LastMessage.Date
+		}
+		sort.Slice(unpinned, func(i, j int) bool {
+			var di, dj int
+			if unpinned[i].LastMessage != nil {
+				di = unpinned[i].LastMessage.Date
+			}
+			if unpinned[j].LastMessage != nil {
+				dj = unpinned[j].LastMessage.Date
 			}
 			return di > dj
 		})
+		chats = append(pinned, unpinned...)
 
 		return DialogsLoadedMsg{Chats: chats}
 	}
@@ -86,6 +96,7 @@ func (c *Client) extractDialogs(dialogs []tg.DialogClass, users []tg.UserClass, 
 
 		chat := Chat{
 			UnreadCount: dialog.UnreadCount,
+			Pinned:      dialog.Pinned,
 		}
 
 		switch peer := dialog.Peer.(type) {

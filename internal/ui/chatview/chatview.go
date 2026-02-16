@@ -2,6 +2,8 @@ package chatview
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,6 +29,8 @@ type Model struct {
 	photoCache   map[int]string // msgID → rendered half-block string
 	photoLines   map[int]int    // msgID → line count of rendered image
 	photoLoading map[int]bool   // msgID → currently downloading
+	// File download state
+	fileSaving map[int]bool // msgID → currently saving to disk
 }
 
 func New(tg *telegram.Client) Model {
@@ -89,6 +93,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	case common.DownloadPhotoErrorMsg:
 		delete(m.photoLoading, msg.MessageID)
+
+	case common.SaveFileMsg:
+		delete(m.fileSaving, msg.MessageID)
+		return m, func() tea.Msg {
+			return common.StatusMsg{Text: "Saved: " + msg.Path}
+		}
+
+	case common.SaveFileErrorMsg:
+		delete(m.fileSaving, msg.MessageID)
+		return m, func() tea.Msg {
+			return common.StatusMsg{Text: "Download failed: " + msg.Err.Error()}
+		}
 
 	case tea.KeyMsg:
 		if !m.focused || m.chat == nil {
@@ -206,6 +222,28 @@ func (m Model) handleViewportKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "i":
 		if m.chat.Type != telegram.ChatTypeChannel {
 			m.inputFocused = true
+		}
+	case "D":
+		if m.cursor >= 0 && m.cursor < len(m.messages) {
+			curMsg := m.messages[m.cursor]
+			if curMsg.Media != nil && m.isDownloadable(curMsg.Media) && !m.fileSaving[curMsg.ID] {
+				destPath := m.downloadPath(curMsg.Media)
+				if m.fileSaving == nil {
+					m.fileSaving = make(map[int]bool)
+				}
+				m.fileSaving[curMsg.ID] = true
+				tgClient := m.tg
+				info := curMsg.Media
+				msgID := curMsg.ID
+				return m, tea.Batch(
+					func() tea.Msg {
+						return common.StatusMsg{Text: "Downloading to " + destPath + "..."}
+					},
+					func() tea.Msg {
+						return tgClient.DownloadToFile(msgID, info, destPath)()
+					},
+				)
+			}
 		}
 	}
 	return m, nil
@@ -502,6 +540,7 @@ func (m Model) SetChat(chat *telegram.Chat) Model {
 	m.photoCache = nil
 	m.photoLines = nil
 	m.photoLoading = nil
+	m.fileSaving = nil
 	return m
 }
 
@@ -570,4 +609,52 @@ func (m Model) photoMaxHeight() int {
 		h = 5
 	}
 	return h
+}
+
+func (m Model) isDownloadable(info *telegram.MediaInfo) bool {
+	switch info.Type {
+	case telegram.MediaPhoto:
+		return info.PhotoThumbSize != ""
+	case telegram.MediaVideo, telegram.MediaDocument, telegram.MediaAudio, telegram.MediaVoice, telegram.MediaAnimation:
+		return info.DocID != 0
+	}
+	return false
+}
+
+func (m Model) downloadPath(info *telegram.MediaInfo) string {
+	dir := filepath.Join(os.Getenv("HOME"), "Downloads")
+	os.MkdirAll(dir, 0o755)
+
+	name := info.FileName
+	if name == "" {
+		ts := time.Now().Format("20060102_150405")
+		switch info.Type {
+		case telegram.MediaPhoto:
+			name = "photo_" + ts + ".jpg"
+		case telegram.MediaVideo:
+			name = "video_" + ts + ".mp4"
+		case telegram.MediaVoice:
+			name = "voice_" + ts + ".ogg"
+		case telegram.MediaAudio:
+			name = "audio_" + ts + ".mp3"
+		case telegram.MediaAnimation:
+			name = "animation_" + ts + ".mp4"
+		default:
+			name = "file_" + ts
+		}
+	}
+
+	path := filepath.Join(dir, name)
+	// Avoid overwriting: add suffix if file exists
+	if _, err := os.Stat(path); err == nil {
+		ext := filepath.Ext(name)
+		base := strings.TrimSuffix(name, ext)
+		for i := 1; ; i++ {
+			path = filepath.Join(dir, fmt.Sprintf("%s_%d%s", base, i, ext))
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				break
+			}
+		}
+	}
+	return path
 }

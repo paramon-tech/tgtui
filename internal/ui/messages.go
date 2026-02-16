@@ -15,4 +15,6 @@ type (
 	MessageSendErrorMsg   = common.MessageSendErrorMsg
 	DownloadPhotoMsg      = common.DownloadPhotoMsg
 	DownloadPhotoErrorMsg = common.DownloadPhotoErrorMsg
+	SaveFileMsg           = common.SaveFileMsg
+	SaveFileErrorMsg      = common.SaveFileErrorMsg
 )
