@@ -10,6 +10,12 @@ type NewMessageMsg struct {
 	Message Message
 }
 
+type ReactionsUpdatedMsg struct {
+	ChatID    int64
+	MsgID     int
+	Reactions []Reaction
+}
+
 func (c *Client) setupHandlers(dispatcher tg.UpdateDispatcher) {
 	dispatcher.OnNewMessage(func(ctx context.Context, e tg.Entities, update *tg.UpdateNewMessage) error {
 		msg, ok := update.Message.(*tg.Message)
@@ -40,7 +46,8 @@ func (c *Client) setupHandlers(dispatcher tg.UpdateDispatcher) {
 				Date:     msg.Date,
 				Out:      msg.Out,
 				Entities: msg.Entities,
-				Media:    extractMediaInfo(msg.Media),
+				Media:     extractMediaInfo(msg.Media),
+				Reactions: extractReactions(msg.Reactions),
 			},
 		})
 		return nil
@@ -75,8 +82,19 @@ func (c *Client) setupHandlers(dispatcher tg.UpdateDispatcher) {
 				Date:     msg.Date,
 				Out:      msg.Out,
 				Entities: msg.Entities,
-				Media:    extractMediaInfo(msg.Media),
+				Media:     extractMediaInfo(msg.Media),
+				Reactions: extractReactions(msg.Reactions),
 			},
+		})
+		return nil
+	})
+
+	dispatcher.OnMessageReactions(func(ctx context.Context, e tg.Entities, update *tg.UpdateMessageReactions) error {
+		chatID := extractChatID(update.Peer)
+		c.send(ReactionsUpdatedMsg{
+			ChatID:    chatID,
+			MsgID:     update.MsgID,
+			Reactions: extractReactions(update.Reactions),
 		})
 		return nil
 	})

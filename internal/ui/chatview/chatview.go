@@ -25,12 +25,23 @@ type Model struct {
 	inputFocused  bool
 	cursor        int
 	expandedMsgID int
+	// History pagination
+	loadingOlder bool
+	noMoreHistory bool
 	// Photo thumbnail cache
 	photoCache   map[int]string // msgID → rendered half-block string
 	photoLines   map[int]int    // msgID → line count of rendered image
 	photoLoading map[int]bool   // msgID → currently downloading
 	// File download state
 	fileSaving map[int]bool // msgID → currently saving to disk
+	// Visual/selection mode
+	selecting bool
+	selected  map[int]bool // selected message IDs
+	// Search mode
+	searching      bool
+	searchQuery    string
+	searchResults  []telegram.Message // messages returned by search
+	searchActive   bool               // true when showing search results
 }
 
 func New(tg *telegram.Client) Model {
@@ -53,13 +64,62 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.scrollOffset = 0
 			m.cursor = len(m.messages) - 1
 			m.expandedMsgID = -1
+			m.loadingOlder = false
+			m.noMoreHistory = false
 		}
+
+	case common.OlderHistoryLoadedMsg:
+		if m.chat != nil && msg.ChatID == m.chat.ID {
+			m.loadingOlder = false
+			if len(msg.Messages) == 0 {
+				m.noMoreHistory = true
+			} else {
+				// Prepend older messages, adjust cursor to keep position
+				m.cursor += len(msg.Messages)
+				m.messages = append(msg.Messages, m.messages...)
+				m.ensureCursorVisible()
+			}
+		}
+
+	case common.OlderHistoryErrorMsg:
+		m.loadingOlder = false
 
 	case common.NewMessageMsg:
 		if m.chat != nil && msg.Message.ChatID == m.chat.ID {
 			m.messages = append(m.messages, msg.Message)
 			m.scrollOffset = 0
 			m.expandedMsgID = -1
+		}
+
+	case common.ReactionsUpdatedMsg:
+		if m.chat != nil && msg.ChatID == m.chat.ID {
+			for i := range m.messages {
+				if m.messages[i].ID == msg.MsgID {
+					m.messages[i].Reactions = msg.Reactions
+					break
+				}
+			}
+		}
+
+	case common.SearchResultMsg:
+		if m.chat != nil && msg.ChatID == m.chat.ID {
+			m.searchResults = msg.Messages
+			m.searchActive = true
+			m.scrollOffset = 0
+			m.expandedMsgID = -1
+			if len(msg.Messages) > 0 {
+				m.cursor = len(msg.Messages) - 1
+			} else {
+				m.cursor = -1
+			}
+			return m, func() tea.Msg {
+				return common.StatusMsg{Text: fmt.Sprintf("Found %d result(s) for \"%s\" — Esc to go back", len(msg.Messages), msg.Query)}
+			}
+		}
+
+	case common.SearchErrorMsg:
+		return m, func() tea.Msg {
+			return common.StatusMsg{Text: "Search failed: " + msg.Err.Error()}
 		}
 
 	case common.HistoryErrorMsg:
@@ -82,6 +142,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 
 	case common.DownloadPhotoMsg:
+		// Use half-block rendering for inline TUI display.
+		// Kitty/iTerm2/Sixel protocols render on a separate graphics layer
+		// that persists across Bubble Tea redraws and overlaps text.
 		rendered, lines, err := format.RenderImageHalfBlock(msg.Data, m.photoMaxWidth(), m.photoMaxHeight())
 		if err == nil {
 			m.initPhotoCaches()
@@ -160,7 +223,7 @@ func (m Model) handleInputKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleViewportKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+func (m Model) handleSelectionKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
 		if m.cursor > 0 {
@@ -172,9 +235,139 @@ func (m Model) handleViewportKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.cursor++
 			m.ensureCursorVisible()
 		}
-	case "enter":
+	case " ":
 		if m.cursor >= 0 && m.cursor < len(m.messages) {
-			curMsg := m.messages[m.cursor]
+			msgID := m.messages[m.cursor].ID
+			if m.selected[msgID] {
+				delete(m.selected, msgID)
+			} else {
+				if m.selected == nil {
+					m.selected = make(map[int]bool)
+				}
+				m.selected[msgID] = true
+			}
+		}
+	case "f":
+		if len(m.selected) == 0 {
+			return m, func() tea.Msg {
+				return common.StatusMsg{Text: "No messages selected"}
+			}
+		}
+		var ids []int
+		for _, msg := range m.messages {
+			if m.selected[msg.ID] {
+				ids = append(ids, msg.ID)
+			}
+		}
+		chat := *m.chat
+		return m, func() tea.Msg {
+			return common.ForwardRequestMsg{
+				FromChat:   chat,
+				MessageIDs: ids,
+			}
+		}
+	case "esc":
+		m.selecting = false
+		m.selected = nil
+	case "pgup":
+		pageSize := m.msgAreaHeight()
+		if pageSize < 1 {
+			pageSize = 1
+		}
+		m.cursor -= pageSize
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		m.ensureCursorVisible()
+	case "pgdown":
+		pageSize := m.msgAreaHeight()
+		if pageSize < 1 {
+			pageSize = 1
+		}
+		m.cursor += pageSize
+		if m.cursor >= len(m.messages) {
+			m.cursor = len(m.messages) - 1
+		}
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		m.ensureCursorVisible()
+	}
+	return m, nil
+}
+
+func (m Model) handleSearchKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		query := strings.TrimSpace(m.searchQuery)
+		if query == "" {
+			m.searching = false
+			m.searchQuery = ""
+			return m, nil
+		}
+		m.searching = false
+		chat := *m.chat
+		tg := m.tg
+		return m, func() tea.Msg {
+			return tg.SearchHistory(chat, query)()
+		}
+
+	case tea.KeyEscape:
+		m.searching = false
+		m.searchQuery = ""
+		return m, nil
+
+	case tea.KeyBackspace:
+		if len(m.searchQuery) > 0 {
+			m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+		}
+
+	case tea.KeyRunes:
+		m.searchQuery += string(msg.Runes)
+
+	case tea.KeySpace:
+		m.searchQuery += " "
+	}
+
+	return m, nil
+}
+
+func (m Model) handleViewportKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if m.searching {
+		return m.handleSearchKey(msg)
+	}
+	if m.selecting {
+		return m.handleSelectionKey(msg)
+	}
+
+	msgs := m.activeMessages()
+
+	switch msg.String() {
+	case "esc":
+		if m.searchActive {
+			m.searchActive = false
+			m.searchResults = nil
+			m.scrollOffset = 0
+			m.cursor = len(m.messages) - 1
+			m.ensureCursorVisible()
+			return m, func() tea.Msg {
+				return common.StatusMsg{Text: ""}
+			}
+		}
+	case "up", "k":
+		if m.cursor > 0 {
+			m.cursor--
+			m.ensureCursorVisible()
+		}
+		return m.maybeLoadOlder()
+	case "down", "j":
+		if m.cursor < len(msgs)-1 {
+			m.cursor++
+			m.ensureCursorVisible()
+		}
+	case "enter":
+		if m.cursor >= 0 && m.cursor < len(msgs) {
+			curMsg := msgs[m.cursor]
 			msgID := curMsg.ID
 			if m.expandedMsgID == msgID {
 				m.expandedMsgID = -1
@@ -206,26 +399,42 @@ func (m Model) handleViewportKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.cursor = 0
 		}
 		m.ensureCursorVisible()
+		return m.maybeLoadOlder()
 	case "pgdown":
 		pageSize := m.msgAreaHeight()
 		if pageSize < 1 {
 			pageSize = 1
 		}
 		m.cursor += pageSize
-		if m.cursor >= len(m.messages) {
-			m.cursor = len(m.messages) - 1
+		if m.cursor >= len(msgs) {
+			m.cursor = len(msgs) - 1
 		}
 		if m.cursor < 0 {
 			m.cursor = 0
 		}
 		m.ensureCursorVisible()
 	case "i":
-		if m.chat.Type != telegram.ChatTypeChannel {
+		if m.chat.Type != telegram.ChatTypeChannel && !m.searchActive {
 			m.inputFocused = true
 		}
+	case "v":
+		if m.searchActive {
+			return m, nil
+		}
+		m.selecting = true
+		if m.selected == nil {
+			m.selected = make(map[int]bool)
+		}
+		if m.cursor >= 0 && m.cursor < len(msgs) {
+			m.selected[msgs[m.cursor].ID] = true
+		}
+	case "/":
+		m.searching = true
+		m.searchQuery = ""
+		return m, nil
 	case "D":
-		if m.cursor >= 0 && m.cursor < len(m.messages) {
-			curMsg := m.messages[m.cursor]
+		if m.cursor >= 0 && m.cursor < len(msgs) {
+			curMsg := msgs[m.cursor]
 			if curMsg.Media != nil && m.isDownloadable(curMsg.Media) && !m.fileSaving[curMsg.ID] {
 				destPath := m.downloadPath(curMsg.Media)
 				if m.fileSaving == nil {
@@ -268,7 +477,11 @@ func (m Model) View() string {
 	if m.chat.Type != telegram.ChatTypeChannel {
 		inputHeight = 1
 	}
-	msgHeight := m.height - 1 - inputHeight // 1 for title
+	searchHeight := 0
+	if m.searching {
+		searchHeight = 1
+	}
+	msgHeight := m.height - 1 - inputHeight - searchHeight // 1 for title
 
 	// Messages
 	msgView := m.renderMessages(msgHeight)
@@ -279,9 +492,18 @@ func (m Model) View() string {
 		inputView = m.renderInput()
 	}
 
+	// Search bar
+	var searchView string
+	if m.searching {
+		searchView = m.renderSearchInput()
+	}
+
 	parts := []string{title, msgView}
 	if inputView != "" {
 		parts = append(parts, inputView)
+	}
+	if searchView != "" {
+		parts = append(parts, searchView)
 	}
 
 	result := strings.Join(parts, "\n")
@@ -299,14 +521,22 @@ func (m Model) renderMessages(height int) string {
 		return ""
 	}
 
-	if len(m.messages) == 0 {
+	msgs := m.activeMessages()
+	if len(msgs) == 0 {
+		if m.searchActive {
+			return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center,
+				common.StyleMuted.Render("No results"))
+		}
 		return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center,
 			common.StyleMuted.Render("No messages"))
 	}
 
 	// Build all visual lines
 	var allLines []string
-	for i, msg := range m.messages {
+	if m.loadingOlder {
+		allLines = append(allLines, common.StyleMuted.Render("  Loading older messages..."))
+	}
+	for i, msg := range msgs {
 		isSelected := (i == m.cursor)
 		isExpanded := msg.ID == m.expandedMsgID
 		lines := m.renderMessageLines(msg, isSelected, isExpanded)
@@ -338,7 +568,7 @@ func (m Model) renderMessages(height int) string {
 }
 
 func (m Model) renderMessageLines(msg telegram.Message, isSelected, isExpanded bool) []string {
-	ts := time.Unix(int64(msg.Date), 0).Format("15:04")
+	ts := time.Unix(int64(msg.Date), 0).Format("Mon 02/01/2006 15:04")
 	timestamp := common.StyleTimestamp.Render("[" + ts + "]")
 
 	var sender string
@@ -350,13 +580,19 @@ func (m Model) renderMessageLines(msg telegram.Message, isSelected, isExpanded b
 		sender = common.StyleSender.Render("Unknown")
 	}
 
+	isMarked := m.selecting && m.selected[msg.ID]
+
 	prefix := "  "
 	if isSelected {
-		if m.inputFocused {
+		if m.selecting {
+			prefix = lipgloss.NewStyle().Foreground(common.ColorWarning).Render(">") + " "
+		} else if m.inputFocused {
 			prefix = lipgloss.NewStyle().Foreground(common.ColorMuted).Render(">") + " "
 		} else {
 			prefix = lipgloss.NewStyle().Foreground(common.ColorPrimary).Render(">") + " "
 		}
+	} else if isMarked {
+		prefix = lipgloss.NewStyle().Foreground(common.ColorWarning).Render("*") + " "
 	}
 
 	if isExpanded && (msg.Text != "" || msg.Media != nil) {
@@ -394,6 +630,12 @@ func (m Model) renderMessageLines(msg telegram.Message, isSelected, isExpanded b
 				lines = append(lines, indent+tl)
 			}
 		}
+
+		// Reactions line (expanded)
+		if len(msg.Reactions) > 0 {
+			lines = append(lines, indent+renderReactions(msg.Reactions))
+		}
+
 		return lines
 	}
 
@@ -409,8 +651,24 @@ func (m Model) renderMessageLines(msg telegram.Message, isSelected, isExpanded b
 	default:
 		text = common.StyleMuted.Render("[empty message]")
 	}
-	line := fmt.Sprintf("%s%s %s: %s", prefix, timestamp, sender, text)
+
+	// Append reactions to collapsed line
+	reactions := ""
+	if len(msg.Reactions) > 0 {
+		reactions = " " + renderReactions(msg.Reactions)
+	}
+
+	line := fmt.Sprintf("%s%s %s: %s%s", prefix, timestamp, sender, text, reactions)
 	return []string{lipgloss.NewStyle().MaxWidth(m.width).Render(line)}
+}
+
+func renderReactions(reactions []telegram.Reaction) string {
+	reactionStyle := lipgloss.NewStyle().Foreground(common.ColorWarning)
+	var parts []string
+	for _, r := range reactions {
+		parts = append(parts, reactionStyle.Render(fmt.Sprintf("%s%d", r.Emoji, r.Count)))
+	}
+	return strings.Join(parts, " ")
 }
 
 func (m Model) renderInput() string {
@@ -427,6 +685,39 @@ func (m Model) renderInput() string {
 	return style.Render(prefix + m.input + cursor)
 }
 
+func (m Model) maybeLoadOlder() (Model, tea.Cmd) {
+	if m.loadingOlder || m.noMoreHistory || m.searchActive || len(m.messages) == 0 {
+		return m, nil
+	}
+	if m.cursor == 0 {
+		m.loadingOlder = true
+		tg := m.tg
+		chat := *m.chat
+		offsetID := m.messages[0].ID
+		return m, func() tea.Msg {
+			return tg.FetchOlderHistory(chat, offsetID)()
+		}
+	}
+	return m, nil
+}
+
+func (m Model) activeMessages() []telegram.Message {
+	if m.searchActive && m.searchResults != nil {
+		return m.searchResults
+	}
+	return m.messages
+}
+
+func (m Model) renderSearchInput() string {
+	style := lipgloss.NewStyle().
+		MaxWidth(m.width).
+		Padding(0, 1)
+
+	prefix := lipgloss.NewStyle().Foreground(common.ColorWarning).Render("/")
+	cursor := "█"
+	return style.Render(prefix + m.searchQuery + cursor)
+}
+
 // Helper methods
 
 func (m Model) msgAreaHeight() int {
@@ -434,7 +725,11 @@ func (m Model) msgAreaHeight() int {
 	if m.chat != nil && m.chat.Type != telegram.ChatTypeChannel {
 		inputHeight = 1
 	}
-	return m.height - 1 - inputHeight
+	searchHeight := 0
+	if m.searching {
+		searchHeight = 1
+	}
+	return m.height - 1 - inputHeight - searchHeight
 }
 
 func (m Model) visualHeight(msg telegram.Message) int {
@@ -460,13 +755,17 @@ func (m Model) visualHeight(msg telegram.Message) int {
 			styledText := format.RenderStyledTextMultiline(msg.Text, msg.Entities, textWidth)
 			h += strings.Count(styledText, "\n") + 1
 		}
+		if len(msg.Reactions) > 0 {
+			h++
+		}
 		return h
 	}
 	return 1
 }
 
 func (m *Model) ensureCursorVisible() {
-	if len(m.messages) == 0 || m.cursor < 0 {
+	msgs := m.activeMessages()
+	if len(msgs) == 0 || m.cursor < 0 {
 		return
 	}
 
@@ -479,7 +778,7 @@ func (m *Model) ensureCursorVisible() {
 	linePos := 0
 	msgTop := 0
 	msgBottom := 0
-	for i, msg := range m.messages {
+	for i, msg := range msgs {
 		h := m.visualHeight(msg)
 		if i == m.cursor {
 			msgTop = linePos
@@ -515,15 +814,16 @@ func (m *Model) ensureCursorVisible() {
 }
 
 func (m *Model) clampCursor() {
-	if len(m.messages) == 0 {
+	msgs := m.activeMessages()
+	if len(msgs) == 0 {
 		m.cursor = -1
 		return
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
-	if m.cursor >= len(m.messages) {
-		m.cursor = len(m.messages) - 1
+	if m.cursor >= len(msgs) {
+		m.cursor = len(msgs) - 1
 	}
 }
 
@@ -537,10 +837,18 @@ func (m Model) SetChat(chat *telegram.Chat) Model {
 	m.cursor = -1
 	m.expandedMsgID = -1
 	m.inputFocused = chat.Type != telegram.ChatTypeChannel
+	m.loadingOlder = false
+	m.noMoreHistory = false
 	m.photoCache = nil
 	m.photoLines = nil
 	m.photoLoading = nil
 	m.fileSaving = nil
+	m.selecting = false
+	m.selected = nil
+	m.searching = false
+	m.searchQuery = ""
+	m.searchResults = nil
+	m.searchActive = false
 	return m
 }
 
@@ -565,6 +873,24 @@ func (m Model) InputFocused() bool {
 
 func (m Model) SetInputFocus(focused bool) Model {
 	m.inputFocused = focused
+	return m
+}
+
+func (m Model) IsSearching() bool {
+	return m.searching
+}
+
+func (m Model) HasSearchResults() bool {
+	return m.searchActive
+}
+
+func (m Model) IsSelecting() bool {
+	return m.selecting
+}
+
+func (m Model) CancelSelection() Model {
+	m.selecting = false
+	m.selected = nil
 	return m
 }
 

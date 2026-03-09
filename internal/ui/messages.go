@@ -17,4 +17,8 @@ type (
 	DownloadPhotoErrorMsg = common.DownloadPhotoErrorMsg
 	SaveFileMsg           = common.SaveFileMsg
 	SaveFileErrorMsg      = common.SaveFileErrorMsg
+	ForwardedMsg          = common.ForwardedMsg
+	ForwardErrorMsg       = common.ForwardErrorMsg
+	ForwardRequestMsg     = common.ForwardRequestMsg
+	ForwardDestSelectedMsg = common.ForwardDestSelectedMsg
 )
