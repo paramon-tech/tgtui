@@ -57,14 +57,21 @@ type MediaInfo struct {
 	DocDCID       int
 }
 
+type Reaction struct {
+	Emoji  string
+	Count  int
+	Chosen bool // current user also sent this reaction
+}
+
 type Message struct {
-	ID       int
-	ChatID   int64
-	SenderID int64
-	Sender   string
-	Text     string
-	Date     int
-	Out      bool
-	Entities []tg.MessageEntityClass
-	Media    *MediaInfo
+	ID        int
+	ChatID    int64
+	SenderID  int64
+	Sender    string
+	Text      string
+	Date      int
+	Out       bool
+	Entities  []tg.MessageEntityClass
+	Media     *MediaInfo
+	Reactions []Reaction
 }

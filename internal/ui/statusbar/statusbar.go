@@ -39,6 +39,8 @@ func (m Model) View() string {
 	switch m.mode {
 	case "INS":
 		modeStyle = modeStyle.Foreground(common.ColorSecondary)
+	case "VIS", "FWD", "SRH":
+		modeStyle = modeStyle.Foreground(common.ColorWarning)
 	default:
 		modeStyle = modeStyle.Foreground(common.ColorPrimary)
 	}

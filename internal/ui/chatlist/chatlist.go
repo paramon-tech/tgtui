@@ -15,8 +15,9 @@ type Model struct {
 	cursor        int
 	offset        int
 	focused       bool
-	activeChatID  int64
-	width, height int
+	activeChatID       int64
+	width, height      int
+	pickingForwardDest bool
 }
 
 func New() Model {
@@ -60,6 +61,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case "enter":
 			if m.cursor < len(m.chats) {
 				chat := m.chats[m.cursor]
+				if m.pickingForwardDest {
+					return m, func() tea.Msg {
+						return common.ForwardDestSelectedMsg{Chat: chat}
+					}
+				}
 				return m, func() tea.Msg {
 					return common.ChatSelectedMsg{Chat: chat}
 				}
@@ -209,6 +215,11 @@ func (m Model) SetActiveChat(id int64) Model {
 
 func (m Model) Focused() bool {
 	return m.focused
+}
+
+func (m Model) SetPickingForwardDest(picking bool) Model {
+	m.pickingForwardDest = picking
+	return m
 }
 
 func truncate(s string, max int) string {

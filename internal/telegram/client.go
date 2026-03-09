@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
 
@@ -20,9 +21,10 @@ type Client struct {
 	p  *tea.Program
 	mu sync.Mutex
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	selfID int64
+	ctx      context.Context
+	cancel   context.CancelFunc
+	selfID   int64
+	loggedIn qrlogin.LoggedIn
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -56,6 +58,7 @@ func (c *Client) SelfID() int64 {
 func (c *Client) Run() error {
 	dispatcher := tg.NewUpdateDispatcher()
 	c.setupHandlers(dispatcher)
+	c.loggedIn = qrlogin.OnLoginToken(dispatcher)
 
 	c.client = telegram.NewClient(c.cfg.APIId, c.cfg.APIHash, telegram.Options{
 		SessionStorage: &FileSessionStorage{Path: c.cfg.SessionPath()},
@@ -97,4 +100,8 @@ func (c *Client) API() *tg.Client {
 
 func (c *Client) Context() context.Context {
 	return c.ctx
+}
+
+func (c *Client) LoggedIn() qrlogin.LoggedIn {
+	return c.loggedIn
 }

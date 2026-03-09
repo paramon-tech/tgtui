@@ -7,6 +7,7 @@ var (
 	ColorSecondary = lipgloss.Color("#9ECE6A")
 	ColorMuted     = lipgloss.Color("#565F89")
 	ColorError     = lipgloss.Color("#F7768E")
+	ColorWarning   = lipgloss.Color("#E0AF68")
 
 	StyleTitle = lipgloss.NewStyle().
 			Bold(true).
@@ -35,7 +36,7 @@ var (
 
 	StyleUnread = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#E0AF68"))
+			Foreground(ColorWarning)
 
 	StyleMediaLabel = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#7DCFFF"))
